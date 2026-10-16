@@ -1,8 +1,12 @@
+#include <inttypes.h>
 #include "hal_data.h"
 #include "sd.h"
+#include "utils/util.h"
 
 #define SD_INSTANCE		g_rm_block_media0
+#define SD_INSTANCE_CFG	UTIL_CONCAT(SD_INSTANCE, _cfg)
 #define SD_CALLBACK		RM_BLOCK_MEDIA_Callback
+#define SD_CD_PIN		BSP_IO_PORT_13_PIN_07
 
 #ifndef __SD_DEBUG
 #define __SD_DEBUG	1
@@ -13,12 +17,20 @@
 #define TAG	__FUNCTION__
 #define LIKE_RETURN(v, t, msg, ...)		if (v == t) { LOG_E(TAG, msg, ##__VA_ARGS__); return v; }
 #define UNLIKE_RETURN(v, t, msg, ...)	if (v != t) { LOG_E(TAG, msg, ##__VA_ARGS__); return v; }
+#define SD_LOGD(msg, ...)				LOG_D(__FUNCTION__, msg, ##__VA_ARGS__)
+#define SD_LOGI(msg, ...)				LOG_I(__FUNCTION__, msg, ##__VA_ARGS__)
+#define SD_LOGW(msg, ...)				LOG_W(__FUNCTION__, msg, ##__VA_ARGS__)
+#define SD_LOGE(msg, ...)				LOG_E(__FUNCTION__, msg, ##__VA_ARGS__)
 #else
 #define LIKE_RETURN(v, t, msg, ...)		if (v == t) { return v; }
 #define UNLIKE_RETURN(v, t, msg, ...)	if (v != t) { return v; }
+#define SD_LOGD(msg, ...)
+#define SD_LOGW(msg, ...)
+#define SD_LOGE(msg, ...)
 #endif
 
-static volatile uint8_t s_inserted;
+static bool s_insert_remove_exist;
+static volatile bool s_inserted;
 static volatile uint8_t s_trans_done;
 
 uint32_t SD_Init(void)
@@ -27,6 +39,8 @@ uint32_t SD_Init(void)
 
 	err = RM_BLOCK_MEDIA_SDMMC_Open(SD_INSTANCE.p_ctrl, SD_INSTANCE.p_cfg);
 	UNLIKE_RETURN(err, 0, "Open failed: %u", err);
+	s_insert_remove_exist = false;
+
 
 	return 0;
 }
@@ -38,16 +52,12 @@ uint32_t SD_InitMedia(void)
 
 	RM_BLOCK_MEDIA_SDMMC_StatusGet(SD_INSTANCE.p_ctrl, &status);
 	if (status.media_inserted != true) {
-		while (s_inserted == 0) {
-			R_BSP_SoftwareDelay(1, BSP_DELAY_UNITS_MILLISECONDS);
-		}
-	#if __SD_DEBUG
-		LOG_D(TAG, "Detect SD Card insert");
-	#endif
+		SD_LOGE("SD Card not inserted");
+		return FSP_ERR_ASSERTION;
 	}
 	R_BSP_SoftwareDelay(1U, BSP_DELAY_UNITS_MILLISECONDS);
 	err = RM_BLOCK_MEDIA_SDMMC_MediaInit(SD_INSTANCE.p_ctrl);
-	UNLIKE_RETURN(err, 0, "MediaInit failed: %u", err);
+	UNLIKE_RETURN(err, 0, "MediaInit failed: %" PRIu32, err);
 	s_trans_done = 1;
 
 	return 0;
@@ -55,15 +65,40 @@ uint32_t SD_InitMedia(void)
 
 uint32_t SD_IsInsert(void)
 {
+	bsp_io_level_t level;
 	rm_block_media_status_t status;
 
-	RM_BLOCK_MEDIA_SDMMC_StatusGet(SD_INSTANCE.p_ctrl, &status);
-	if (status.media_inserted && s_inserted) {
-		return 1;
+	const rm_block_media_sdmmc_extended_cfg_t *p_extend_cfg = (const rm_block_media_sdmmc_extended_cfg_t *)SD_INSTANCE_CFG.p_extend;
+	sdmmc_cfg_t *p_sdmmc_cfg = (sdmmc_cfg_t *)p_extend_cfg->p_sdmmc->p_cfg;
+
+	if (p_sdmmc_cfg->card_detect == SDMMC_CARD_DETECT_CD) {
+		RM_BLOCK_MEDIA_SDMMC_StatusGet(SD_INSTANCE.p_ctrl, &status);
+		if (s_insert_remove_exist) {
+			R_BSP_SoftwareDelay(10, BSP_DELAY_UNITS_MICROSECONDS);
+			R_IOPORT_PinRead(g_ioport.p_ctrl, SD_CD_PIN, &level);
+			if (level == BSP_IO_LEVEL_HIGH) {
+				s_inserted = false;
+			}
+			else {
+				s_inserted = true;
+			}
+			s_insert_remove_exist = false;
+		}
+		if (status.media_inserted && s_inserted) {
+			return 1;
+		}
+		else {
+			return 0;
+		}
 	}
 	else {
-		return 0;
+		return 1;
 	}
+}
+
+uint32_t SD_IsInsertRemoveExist(void)
+{
+	return s_insert_remove_exist ? 1 : 0;
 }
 
 uint32_t SD_IsTransDone(void)
@@ -157,44 +192,35 @@ uint32_t SD_Write(uint8_t const *src, uint32_t block_addr, uint32_t size)
 void SD_CALLBACK(rm_block_media_callback_args_t *p_args)
 {
 	if (p_args->event == (RM_BLOCK_MEDIA_EVENT_MEDIA_REMOVED | RM_BLOCK_MEDIA_EVENT_MEDIA_INSERTED)) {
-		p_args->event &= (~RM_BLOCK_MEDIA_EVENT_MEDIA_INSERTED);
+		SD_LOGW("Receive REMOVED and INSERTED simultaneously");
+		p_args->event &= ~RM_BLOCK_MEDIA_EVENT_MEDIA_REMOVED;
+		p_args->event &= ~RM_BLOCK_MEDIA_EVENT_MEDIA_INSERTED;
+		s_insert_remove_exist = true;
 	}
 
-	switch (p_args->event) {
-	case RM_BLOCK_MEDIA_EVENT_MEDIA_REMOVED:
-	#if __SD_DEBUG
-		LOG_D(TAG, "Removed");
-	#endif
-		s_inserted = 0;
-		break;
-	case RM_BLOCK_MEDIA_EVENT_MEDIA_INSERTED:
-	#if __SD_DEBUG
-		LOG_D(TAG, "Inserted");
-	#endif
-		s_inserted = 1;
-		break;
-	case RM_BLOCK_MEDIA_EVENT_OPERATION_COMPLETE:
-		s_trans_done = 1;
-		break;
-	case RM_BLOCK_MEDIA_EVENT_ERROR:
-		break;
-	case RM_BLOCK_MEDIA_EVENT_POLL_STATUS:
-		break;
-	case RM_BLOCK_MEDIA_EVENT_MEDIA_SUSPEND:
-	#if __SD_DEBUG
-		LOG_D(TAG, "Suspend");
-	#endif
-		break;
-	case RM_BLOCK_MEDIA_EVENT_MEDIA_RESUME:
-	#if __SD_DEBUG
-		LOG_D(TAG, "Resume");
-	#endif
-		break;
-	case RM_BLOCK_MEDIA_EVENT_WAIT:
-		break;
-	case RM_BLOCK_MEDIA_EVENT_WAIT_END:
-		break;
-	default:
-		break;
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_MEDIA_REMOVED) {
+		SD_LOGD("Removed");
+		s_inserted = false;
+		s_insert_remove_exist = false;
 	}
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_MEDIA_INSERTED) {
+		SD_LOGD("Inserted");
+		s_inserted = true;
+		s_insert_remove_exist = false;
+	}
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_OPERATION_COMPLETE) {
+		s_trans_done = 1;
+	}
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_ERROR) {
+		SD_LOGE("Error");
+	}
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_POLL_STATUS) {}
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_MEDIA_SUSPEND) {
+		SD_LOGD("Suspend");
+	}
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_MEDIA_RESUME) {
+		SD_LOGD("Resume");
+	}
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_WAIT) {}
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_WAIT_END) {}
 }

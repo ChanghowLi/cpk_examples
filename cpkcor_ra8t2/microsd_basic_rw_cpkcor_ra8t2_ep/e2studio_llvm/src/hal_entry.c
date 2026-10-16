@@ -21,6 +21,9 @@ bsp_ipc_semaphore_handle_t g_core_start_semaphore =
 void hal_entry(void)
 {
 	/* TODO: add your own code here */
+	uint32_t i;
+	uint32_t err;
+
 	perfc_init(false);
 #if CONSOLE_CFG_USE_RTT == 0
 	SEGGER_RTT_Init();
@@ -72,14 +75,36 @@ void hal_entry(void)
     	}
     }
     printf("\r\nDetect SD Card insert\r\n");
-    SD_InitMedia();
+
+    err = SD_InitMedia();
+    printf("Media Init: %u\r\n", err);
     TestSD();
 
     while (1) {
 		R_IOPORT_PinWrite(g_ioport.p_ctrl, USER_LED, BSP_IO_LEVEL_HIGH);
-		R_BSP_SoftwareDelay(500, BSP_DELAY_UNITS_MILLISECONDS);
+		for (i = 0; i < 500; i++) {
+			R_BSP_SoftwareDelay(1, BSP_DELAY_UNITS_MILLISECONDS);
+			if (SD_IsInsertRemoveExist()) {
+				if (SD_IsInsert()) {
+					LOG_D(__FUNCTION__, "Inserted");
+				}
+				else {
+					LOG_D(__FUNCTION__, "Removed");
+				}
+			}
+		}
 		R_IOPORT_PinWrite(g_ioport.p_ctrl, USER_LED, BSP_IO_LEVEL_LOW);
-		R_BSP_SoftwareDelay(500, BSP_DELAY_UNITS_MILLISECONDS);
+		for (i = 0; i < 500; i++) {
+			R_BSP_SoftwareDelay(1, BSP_DELAY_UNITS_MILLISECONDS);
+			if (SD_IsInsertRemoveExist()) {
+				if (SD_IsInsert()) {
+					LOG_D(__FUNCTION__, "Inserted");
+				}
+				else {
+					LOG_D(__FUNCTION__, "Removed");
+				}
+			}
+		}
 	}
 
 #if BSP_TZ_SECURE_BUILD

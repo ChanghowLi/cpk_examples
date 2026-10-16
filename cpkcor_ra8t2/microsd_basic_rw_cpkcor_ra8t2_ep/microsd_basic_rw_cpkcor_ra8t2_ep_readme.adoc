@@ -2,7 +2,7 @@
 
 == 运行
 
-在 e^2^ studio 中导入工程，生成并编译，或直接烧录本文件夹下的 sd_base_wr.hex。打开一个串口调试工具，波特率 2000000，数据位 8bit，停止位 1bit，无奇偶校验。程序烧录后，会等待 SD 插入，然后进行读写速度测试。SD 卡读写速度与 SD 卡本身关系较大，以下是两张不同的 SD 卡的速度测试结果。在测试完成后，程序不会再对 SD 卡进行读写操作，此时可以插拔 SD 卡来检查 RA8P1 的插拔检测功能是否正常
+在 e^2^ studio 中导入工程，生成并编译，或直接烧录本文件夹下的 microsd_basic_rw_cpkcor_ra8t2_ep.hex。打开一个串口调试工具，波特率 2000000，数据位 8bit，停止位 1bit，无奇偶校验。程序烧录后，会等待 SD 插入，然后进行读写速度测试。SD 卡读写速度与 SD 卡本身关系较大，以下是两张不同的 SD 卡的速度测试结果。在测试完成后，程序不会再对 SD 卡进行读写操作，此时可以插拔 SD 卡来检查 RA8P1 的插拔检测功能是否正常
 
 SD Card 1
 
@@ -61,4 +61,88 @@ sd.c 和 sd.h 只是对 FSP 中 rm_block_media_sdmmc 相关 API 的简单封装�
 [.text-center]
 --
 image::Snipaste_2026-07-21_10-29-33.png[role="thumb"]
+--
+
+=== 卡插入检测
+
+卡插入检测功能由卡槽机械功能提供，不同卡槽电平变化的抖动时间可能不一致，如果抖动时间较长，FSP 给出的回调函数事件中，可能会同时给出卡插入事件和移除事件，此时最好再额外判断 CD 引脚的电平来辅助判断，以下是综合判断的示例，提供一种思路。
+
+SD 卡的中断回调，相关代码位于 sd.c 中
+
+[source,c,subs="verbatim,attributes"]
+----
+void SD_CALLBACK(rm_block_media_callback_args_t *p_args)
+{
+    ...
+
+    /* 同时收到卡插入事件和卡移除事件
+     * 删除两个事件，并对 s_insert_remove_exist 进行标记
+     * 可以直接使用 == 进行判断，FSP 区分卡插拔检测中断和读写中断入口函数，卡插拔检测中断只会给出这两个事件 */
+	if (p_args->event == (RM_BLOCK_MEDIA_EVENT_MEDIA_REMOVED | RM_BLOCK_MEDIA_EVENT_MEDIA_INSERTED)) {
+		SD_LOGW("Receive REMOVED and INSERTED simultaneously");
+		p_args->event &= ~RM_BLOCK_MEDIA_EVENT_MEDIA_REMOVED;
+		p_args->event &= ~RM_BLOCK_MEDIA_EVENT_MEDIA_INSERTED;
+		s_insert_remove_exist = true;
+	}
+
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_MEDIA_REMOVED) {
+		SD_LOGD("Removed");
+		s_inserted = false;
+		s_insert_remove_exist = false;
+	}
+	if (p_args->event & RM_BLOCK_MEDIA_EVENT_MEDIA_INSERTED) {
+		SD_LOGD("Inserted");
+		s_inserted = true;
+		s_insert_remove_exist = false;
+	}
+
+    ...
+}
+----
+
+在自己实现的卡插入查询函数中做处理，相关代码位于 sd.c 中
+
+[source,c,subs="verbatim,attributes"]
+----
+uint32_t SD_IsInsert(void)
+{
+	bsp_io_level_t level;
+	rm_block_media_status_t status;
+
+	const rm_block_media_sdmmc_extended_cfg_t *p_extend_cfg = (const rm_block_media_sdmmc_extended_cfg_t *)SD_INSTANCE_CFG.p_extend;
+	sdmmc_cfg_t *p_sdmmc_cfg = (sdmmc_cfg_t *)p_extend_cfg->p_sdmmc->p_cfg;
+
+	if (p_sdmmc_cfg->card_detect == SDMMC_CARD_DETECT_CD) {
+		RM_BLOCK_MEDIA_SDMMC_StatusGet(SD_INSTANCE.p_ctrl, &status);
+        /* 如果最后一次同时收到卡插入和移除事件，就再读取 SD_CD_PIN 的电平做判断
+         * SD_CD_PIN 为高表示没有卡；SD_CD_PIN 为低表示有卡 */
+		if (s_insert_remove_exist) {
+			R_BSP_SoftwareDelay(10, BSP_DELAY_UNITS_MICROSECONDS);
+			R_IOPORT_PinRead(g_ioport.p_ctrl, SD_CD_PIN, &level);
+			if (level == BSP_IO_LEVEL_HIGH) {
+				s_inserted = false;
+			}
+			else {
+				s_inserted = true;
+			}
+			s_insert_remove_exist = false;
+		}
+		if (status.media_inserted && s_inserted) {
+			return 1;
+		}
+		else {
+			return 0;
+		}
+	}
+	else {
+		return 1;
+	}
+}
+----
+
+此时，若遇到同时收到卡插入移除时的检测输出如下：
+
+[.text-center]
+--
+image::Snipaste_2026-09-23_11-34-36.png[role="thumb"]
 --
